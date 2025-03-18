@@ -21,7 +21,7 @@ The **Smart Radiator Test Setup** is designed to verify motor movement, valve co
 This method is best for testing precise movements and physical compatibility before real deployment.  
 
 ### **Option 2: Mechanical Substitute (Simple Test Rig)**  
-- Use a plastic or metal knob (e.g., an old potentiometer knob) to mimic a radiator valve’s turning motion.  
+- Use a plastic or metal knob to mimic a radiator valve’s turning motion.  
 - Mount it on a wooden or acrylic base for stability.  
 - Manually block rotation at specific points to test resistance detection.  
 

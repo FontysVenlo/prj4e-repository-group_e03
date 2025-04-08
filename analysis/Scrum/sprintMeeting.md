@@ -15,6 +15,7 @@
   - (Temp. Sensor)
 - Write Down important bits
 - 3D printing
+- Set up Project Board
 
 # Sprint Plan Meeting 14.04 - 20.04
 ## Prerequisits

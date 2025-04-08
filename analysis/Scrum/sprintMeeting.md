@@ -10,7 +10,7 @@
 - Knowledge about every part
 - Get parts working in prototype phase
   - Motor spinning + Driver
-  - Power Spully connection
+  - Power Supply connection
   - Display for ESP
   - (Temp. Sensor)
 - Write Down important bits

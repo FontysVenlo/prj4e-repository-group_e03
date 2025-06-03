@@ -1,6 +1,8 @@
 #include <Arduino.h>
 #include "LoRaDevice.h"
 #include "TemperatureManager.h"
+#include <DallasTemperature.h>
+#include <OneWire.h>
 
 // --- Function Declarations ---
 void TaskTemperatureReader(void *pvParameters);
@@ -16,6 +18,10 @@ SemaphoreHandle_t tempMutex;
 const int buttonUpPin = 17;
 const int buttonDownPin = 16;
 const unsigned long debounceDelay = 50;
+#define ONE_WIRE_BUS 4  // DS18B20 data connected here
+
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
 
 TaskHandle_t TaskButtonUpHandle = NULL;
 TaskHandle_t TaskButtonDownHandle = NULL;
@@ -31,6 +37,8 @@ void setup() {
 
   tempMutex = xSemaphoreCreateMutex();
 
+  sensors.begin();
+
   if (!lora.begin(868E6)) {
     Serial.println("LoRa init failed!");
     while (true);
@@ -44,22 +52,63 @@ void setup() {
 }
 
 void loop() {
-  // All logic handled by tasks
 }
 
 // --- Task Implementations ---
 
 void TaskTemperatureReader(void *pvParameters) {
-  for (;;) {
-    float simulatedTemperature = 21.7;
-    if (xSemaphoreTake(tempMutex, portMAX_DELAY)) {
-      tempManager.updateTemperature(simulatedTemperature);
-      lora.sendCurrentTemperature(tempManager.getCurrentTemperature());
-      xSemaphoreGive(tempMutex);
+  Serial.println("TemperatureReader task started");
+
+  sensors.begin();
+  int deviceCount = sensors.getDeviceCount();
+  Serial.print("DS18B20 devices found: ");
+  Serial.println(deviceCount);
+
+  if (deviceCount == 0) {
+    Serial.println("No DS18B20 sensors detected! Check wiring.");
+  }
+
+  DeviceAddress deviceAddress;
+  if (deviceCount > 0) {
+    if (sensors.getAddress(deviceAddress, 0)) {
+      Serial.print("Sensor address: ");
+      for (uint8_t i = 0; i < 8; i++) {
+        if (deviceAddress[i] < 16) Serial.print("0");
+        Serial.print(deviceAddress[i], HEX);
+      }
+      Serial.println();
+    } else {
+      Serial.println("Failed to read sensor address.");
     }
-    vTaskDelay(30000 / portTICK_PERIOD_MS);
+  }
+
+  for (;;) {
+    if (deviceCount > 0) {
+      sensors.requestTemperatures();
+      float temperature = sensors.getTempCByIndex(0);
+
+      if (temperature == DEVICE_DISCONNECTED_C) {
+        Serial.println("Error: Could not read temperature data");
+      } else {
+        Serial.print("Temperature read: ");
+        Serial.print(temperature);
+        Serial.println(" °C");
+
+        if (xSemaphoreTake(tempMutex, portMAX_DELAY)) {
+          tempManager.updateTemperature(temperature);
+          lora.sendCurrentTemperature(tempManager.getCurrentTemperature());
+          xSemaphoreGive(tempMutex);
+        }
+      }
+    } else {
+      Serial.println("Skipping temperature read — no sensors detected.");
+    }
+    vTaskDelay(5000 / portTICK_PERIOD_MS);
   }
 }
+
+
+
 
 void TaskButtonUp(void *pvParameters) {
   bool lastState = LOW;

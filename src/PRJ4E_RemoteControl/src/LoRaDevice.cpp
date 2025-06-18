@@ -15,23 +15,3 @@ bool LoRaDevice::begin(long frequency) {
   return LoRa.begin(frequency);
 }
 
-void LoRaDevice::sendMessage(const String& label, int value) {
-  LoRa.beginPacket();
-  LoRa.print(label);
-  LoRa.print(":");
-  LoRa.print(value);
-  LoRa.endPacket();
-
-  Serial.print("[LoRa] Sent ");
-  Serial.print(label);
-  Serial.print(": ");
-  Serial.println(value);
-}
-
-void LoRaDevice::sendCurrentTemperature(int temp) {
-  sendMessage("current", temp);
-}
-
-void LoRaDevice::sendTargetTemperature(int temp) {
-  sendMessage("target", temp);
-}

@@ -8,10 +8,6 @@ class LoRaDevice {
   public:
     LoRaDevice();
     bool begin(long frequency);
-    void sendCurrentTemperature(int temp);
-    void sendTargetTemperature(int temp);
-  private:
-    void sendMessage(const String& label, int value);
 };
 
 #endif

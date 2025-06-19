@@ -1,111 +1,164 @@
+#include <Arduino.h>
+#include <SPI.h>
+#include <LoRa.h>
 #include <TMCStepper.h>
 
-#define DIR_PIN     14
-#define STEP_PIN    12
-#define DRIVER_ADDRESS 0b00  // Adjust if using multiple drivers
+// LoRa Pins
+#define LORA_SCK 5
+#define LORA_MISO 19
+#define LORA_MOSI 27
+#define LORA_SS 18
+#define LORA_RST 23
+#define LORA_DI0 26
 
-#define stepDelay 1000
+// Stepper Pins
+#define STEP_PIN 12
+#define DIR_PIN 14
+#define EN_PIN 13   // Enable pin for driver, set as needed
 
-#define R_SENSE 0.11f  // TMC2209 typical sense resistor
+// TMC2209 Settings
+#define R_SENSE 0.11f
+#define DRIVER_ADDRESS 0b00
 
+// UART for TMC2209
+#define UART_RX_PIN 13
+#define UART_TX_PIN 15
+
+// Constants
+const int MAX_POSITION = 100;  // Fully pressed position (forward)
+
+// Global state
+volatile int currentValvePosition = 0;   // Current step position (0-100)
+volatile int targetValvePosition = 0;    // Target step position (0-100)
+volatile bool commandReceived = false;   // Flag for first command received
+
+// Initialize Serial2 for TMC2209
 TMC2209Stepper driver(&Serial2, R_SENSE, DRIVER_ADDRESS);
 
-TaskHandle_t StepperTaskHandle = NULL;
-TaskHandle_t StallGuardTaskHandle = NULL;
+// --- LoRa receive task ---
+void taskLoRaReceive(void *pvParameters) {
+  Serial.println("[LoRaRecv] Task started");
 
-void TaskStepper(void *pvParameters) {
   for (;;) {
-    digitalWrite(DIR_PIN, HIGH);
-    delayMicroseconds(100);
-    for (int i = 0; i < 1000; i++) {
-      digitalWrite(STEP_PIN, HIGH);
-      delayMicroseconds(stepDelay);
-      digitalWrite(STEP_PIN, LOW);
-      delayMicroseconds(stepDelay);
-    }
-    vTaskDelay(pdMS_TO_TICKS(500));
+    int packetSize = LoRa.parsePacket();
+    if (packetSize) {
+      String incoming = "";
+      while (LoRa.available()) {
+        incoming += (char)LoRa.read();
+      }
+      incoming.trim();
 
-    digitalWrite(DIR_PIN, LOW);
-    delayMicroseconds(100);
-    for (int i = 0; i < 1000; i++) {
-      digitalWrite(STEP_PIN, HIGH);
-      delayMicroseconds(stepDelay);
-      digitalWrite(STEP_PIN, LOW);
-      delayMicroseconds(stepDelay);
+      Serial.print("[LoRaRecv] Received: ");
+      Serial.println(incoming);
+
+      String incomingUpper = incoming;
+      incomingUpper.toUpperCase();
+      if (incomingUpper.startsWith("VALVE:")) {
+        String valStr = incoming.substring(6);
+        float valvePercent = valStr.toFloat();
+
+        if (valvePercent >= 0.0f && valvePercent <= 100.0f) {
+          int newTarget = MAX_POSITION - round(valvePercent);
+
+          if (newTarget < 0) newTarget = 0;
+          if (newTarget > MAX_POSITION) newTarget = MAX_POSITION;
+
+          targetValvePosition = newTarget;
+          commandReceived = true;
+
+          Serial.printf("[LoRaRecv] valvePercent=%.2f, targetValvePosition=%d\n", valvePercent, targetValvePosition);
+        }
+      }
     }
-    vTaskDelay(pdMS_TO_TICKS(500));
+    vTaskDelay(pdMS_TO_TICKS(100));
   }
 }
 
-void TaskStallGuard(void *pvParameters) {
+// --- Motor control task ---
+void taskMotorControl(void *pvParameters) {
+  Serial.println("[MotorTask] Started");
+
   for (;;) {
-    // Read all the important registers and print
-    uint8_t toff = driver.toff();
-    uint16_t SG_RESULT = driver.SG_RESULT();
-    uint8_t sg_thrs = driver.SGTHRS();
-    uint8_t stealthChop_enabled = driver.en_spreadCycle() ? 0 : 1; // stealthChop = !spreadCycle
-    uint16_t coolthrs = driver.TCOOLTHRS();
-    uint8_t pwm_autoscale = driver.pwm_autoscale();
-    uint8_t pwm_reg = driver.pwm_reg();
-
-    Serial.print("TOFF: "); Serial.println(toff);
-    Serial.print("SG_RESULT: "); Serial.println(SG_RESULT);
-    Serial.print("SG_THRS: "); Serial.println(sg_thrs);
-    Serial.print("StealthChop enabled: "); Serial.println(stealthChop_enabled);
-    Serial.print("CoolThrs: "); Serial.println(coolthrs);
-    Serial.print("PWM Autoscale: "); Serial.println(pwm_autoscale);
-    Serial.print("PWM Reg: "); Serial.println(pwm_reg);
-
-    if (SG_RESULT < 50) { 
-      Serial.println("Possible stall detected - mechanical resistance?");
-    } else {
-      Serial.println("Motor running normally.");
+    if (!commandReceived) {
+      vTaskDelay(pdMS_TO_TICKS(100));
+      continue;
     }
 
-    vTaskDelay(pdMS_TO_TICKS(200));
+    if (targetValvePosition != currentValvePosition) {
+      int direction = (targetValvePosition > currentValvePosition) ? HIGH : LOW;
+      digitalWrite(DIR_PIN, direction);
+
+      // Pulse step pin
+      digitalWrite(STEP_PIN, HIGH);
+      delayMicroseconds(1000);
+      digitalWrite(STEP_PIN, LOW);
+      delayMicroseconds(1000);
+
+      if (direction == HIGH) {
+        currentValvePosition = min(currentValvePosition + 1, MAX_POSITION);
+      } else {
+        currentValvePosition = max(currentValvePosition - 1, 0);
+      }
+
+      Serial.printf("[MotorTask] Moving step: %d / %d\n", currentValvePosition, targetValvePosition);
+
+      vTaskDelay(pdMS_TO_TICKS(1));
+    } else {
+      vTaskDelay(pdMS_TO_TICKS(10));
+    }
   }
 }
 
 void setup() {
   Serial.begin(115200);
-  Serial.println("Initializing stepper and stallguard tasks...");
+  delay(1000);
+  Serial.println("Setup started");
 
-  pinMode(DIR_PIN, OUTPUT);
+  // Setup pins
   pinMode(STEP_PIN, OUTPUT);
+  pinMode(DIR_PIN, OUTPUT);
+  pinMode(EN_PIN, OUTPUT);
+  digitalWrite(STEP_PIN, LOW);
+  digitalWrite(DIR_PIN, LOW);
 
-  Serial2.begin(115200, SERIAL_8N1, 13, 15);  // RX, TX
+  // Enable driver
+  digitalWrite(EN_PIN, LOW);  // LOW to enable (depends on your wiring)
 
+  // Setup UART for TMC2209
+  Serial2.begin(115200, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);
   driver.begin();
-  driver.toff(5);                // Must be >0 to enable motor
-  driver.rms_current(600);
-  driver.microsteps(16);
+  driver.rms_current(600);       // Set motor current in mA
+  driver.microsteps(16);         // Set microsteps (e.g. 16)
 
-  driver.en_spreadCycle(true);  // IMPORTANT: SpreadCycle for StallGuard
-  driver.pwm_autoscale(true);
-  driver.SGTHRS(10);
-  driver.TCOOLTHRS(0xFFFFF);
+  // Setup LoRa
+  SPI.begin(LORA_SCK, LORA_MISO, LORA_MOSI, LORA_SS);
+  LoRa.setPins(LORA_SS, LORA_RST, LORA_DI0);
+  if (!LoRa.begin(868E6)) {
+    Serial.println("LoRa init failed.");
+    while (1);
+  }
+  Serial.println("LoRa init OK.");
 
-  // Start the motor stepper task
-  xTaskCreate(
-    TaskStepper,
-    "StepperTask",
-    2048,
-    NULL,
-    1,
-    &StepperTaskHandle
-  );
+  // Move motor fully forward 100 steps on startup
+  Serial.println("Homing: moving fully forward 100 steps...");
+  digitalWrite(DIR_PIN, HIGH);
+  for (int i = 0; i < MAX_POSITION; i++) {
+    digitalWrite(STEP_PIN, HIGH);
+    delayMicroseconds(1000);
+    digitalWrite(STEP_PIN, LOW);
+    delayMicroseconds(1000);
+  }
+  currentValvePosition = MAX_POSITION;
+  targetValvePosition = MAX_POSITION;
+  commandReceived = false;
 
-  // Start the stall guard monitoring task
-  xTaskCreate(
-    TaskStallGuard,
-    "StallGuardTask",
-    2048,
-    NULL,
-    1,
-    &StallGuardTaskHandle
-  );
+  // Start FreeRTOS tasks
+  xTaskCreate(taskLoRaReceive, "LoRaRecv", 2048, NULL, 1, NULL);
+  xTaskCreate(taskMotorControl, "MotorCtrl", 2048, NULL, 1, NULL);
+
+  Serial.println("Setup complete");
 }
 
 void loop() {
-  // Empty, multitasking handles everything
+  // Empty, all work done in tasks
 }

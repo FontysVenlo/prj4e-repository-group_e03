@@ -2,6 +2,17 @@
 #include <SPI.h>
 #include <LoRa.h>
 #include <TMCStepper.h>
+#include <Adafruit_INA219.h>
+
+// INA219 instance
+Adafruit_INA219 ina219;
+
+// Stall detection
+volatile bool stallDetected = false;
+const float stallCurrentThreshold = 1000.0f;  // in milliamps (adjust as needed)
+const int stallSampleLimit = 5;              // number of samples over threshold to count as stall
+int stallCounter = 0;
+
 
 // LoRa Pins
 #define LORA_SCK 5
@@ -35,6 +46,30 @@ volatile bool commandReceived = false;   // Flag for first command received
 // Initialize Serial2 for TMC2209
 TMC2209Stepper driver(&Serial2, R_SENSE, DRIVER_ADDRESS);
 
+void taskMonitorCurrent(void *pvParameters) {
+  Serial.println("[Monitor] Current monitor started");
+
+  for (;;) {
+    float current_mA = ina219.getCurrent_mA();
+
+    if (current_mA > stallCurrentThreshold) {
+      stallCounter++;
+    } else {
+      stallCounter = 0;
+    }
+
+    if (stallCounter >= stallSampleLimit) {
+      Serial.printf("[Monitor] Stall detected! Current: %.2f mA\n", current_mA);
+      stallDetected = true;
+      commandReceived = false;  // stop motor movement
+      stallCounter = 0;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(100));  // check every 100ms
+  }
+}
+
+
 // --- LoRa receive task ---
 void taskLoRaReceive(void *pvParameters) {
   Serial.println("[LoRaRecv] Task started");
@@ -64,6 +99,7 @@ void taskLoRaReceive(void *pvParameters) {
           if (newTarget > MAX_POSITION) newTarget = MAX_POSITION;
 
           targetValvePosition = newTarget;
+          stallDetected = false;      
           commandReceived = true;
 
           Serial.printf("[LoRaRecv] valvePercent=%.2f, targetValvePosition=%d\n", valvePercent, targetValvePosition);
@@ -79,10 +115,12 @@ void taskMotorControl(void *pvParameters) {
   Serial.println("[MotorTask] Started");
 
   for (;;) {
-    if (!commandReceived) {
-      vTaskDelay(pdMS_TO_TICKS(100));
+
+    if (!commandReceived || stallDetected) {
+      vTaskDelay(pdMS_TO_TICKS(20));
       continue;
     }
+
 
     if (targetValvePosition != currentValvePosition) {
       int direction = (targetValvePosition > currentValvePosition) ? HIGH : LOW;
@@ -113,6 +151,14 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
   Serial.println("Setup started");
+
+  // Initialize INA219
+if (!ina219.begin()) {
+  Serial.println("INA219 not found. Check wiring.");
+  while (1);  // halt if INA not found
+}
+
+
 
   // Setup pins
   pinMode(STEP_PIN, OUTPUT);
@@ -155,6 +201,7 @@ void setup() {
   // Start FreeRTOS tasks
   xTaskCreate(taskLoRaReceive, "LoRaRecv", 2048, NULL, 1, NULL);
   xTaskCreate(taskMotorControl, "MotorCtrl", 2048, NULL, 1, NULL);
+  xTaskCreate(taskMonitorCurrent, "MonitorCurrent", 2048, NULL, 1, NULL);
 
   Serial.println("Setup complete");
 }
